@@ -10,6 +10,11 @@ from typing import List, Dict
 
 import asyncio
 from database import Database
+from repositories import GameRepository
+from pydantic import BaseModel
+from fastapi import HTTPException
+from typing import List
+import random
 from repositories import GameRepository, PlayerRepository
 import services.counter
 from model import Player, Game
@@ -58,6 +63,53 @@ async def add_repos_to_request(request: Request, call_next):
 
 def get_games_repo(request: Request) -> GameRepository:
     return request.state.game_repo
+
+
+class PlayersOut(BaseModel):
+    id: UUID
+    name: str
+    
+class GamePlayerResp(BaseModel):
+    game_id: int
+    players: List[PlayersOut]
+
+
+@app.post("/api/start_game/{game_id}", response_model=GamePlayerResp)
+async def sortear_jugadores(
+    game_id: int, game_repo: GameRepository = Depends(get_games_repo)
+):
+    game = game_repo.get(game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="Partida no encontrada")
+
+    elif len(game.players) < game.min_players:
+        raise HTTPException(
+            status_code=412,
+            detail="No se puede sortear jugadores si no hay suficientes jugadores",
+        )
+    elif game.started == False:
+        raise HTTPException(status_code=400, detail="El juego no empezo")
+    random.shuffle(game.players)
+    print("Jugadores después  recien de sortearrrrrrrrrr:")
+    for player in game.players:
+        print(f"- {player.name} (ID: {player.identifier})")
+
+
+
+    game_repo.save(game)
+    new_game = game_repo.get(game_id)
+
+
+    print("Jugadores después de sortearrrrrrrrrr:")
+    for player in new_game.players:
+        print(f"- {player.name} (ID: {player.identifier})")
+
+
+    players_out = [
+            PlayersOut(id=UUID(str(player.identifier)), name=player.name) for player in new_game.players
+    ]
+    return GamePlayerResp(game_id=game_id, players=players_out)
+        
 
 
 def get_card_repo(request: Request) -> FigRepository:
