@@ -15,6 +15,7 @@ from model import Game, Player
 from model.exceptions import GameStarted, PreconditionsNotMet
 from repositories import (FigRepository, GameRepository, PlayerRepository,
                           create_all_figs)
+from services.connection_manager import LobbyConnectionHandler
 
 db_uri = getenv("DB_URI")
 if db_uri is not None:
@@ -27,6 +28,7 @@ db.create_tables()
 app = FastAPI()
 
 session = db.get_session()
+
 
 player_repo = PlayerRepository(session)
 game_repo = GameRepository(session)
@@ -155,6 +157,14 @@ def get_games_available(
         )
         lobbies.append(lobby)
     return lobbies
+
+
+connection_manager = LobbyConnectionHandler()
+
+
+@app.websocket("/ws/lobby/{lobby_id}")
+async def lobby_websocket_handler(websocket: WebSocket, lobby_id: int):
+    await connection_manager.listen(websocket, lobby_id, game_repo, player_repo)
 
 
 @app.post("/api/lobby/timer")
