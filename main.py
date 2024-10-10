@@ -9,6 +9,7 @@ from fastapi.websockets import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+import services.connection_manager
 import services.counter
 from database import Database
 from model import Game, Player
@@ -64,6 +65,13 @@ def get_player_repo(request: Request) -> PlayerRepository:
     return request.state.player_repo
 
 
+# no se si esta bien
+def get_connection_manager(
+    request: Request,
+) -> services.connection_manager.ConnectionManager:
+    return Managers.get_manager(ManagerTypes.JOIN_LEAVE)
+
+
 class GameIn(BaseModel):
     identifier: UUID
     name: str = Field(min_length=1, max_length=64)
@@ -72,7 +80,7 @@ class GameIn(BaseModel):
 
 
 class PlayerOut(BaseModel):
-    id_player: UUID
+    id_player: UUID  # NO LE ENVIO ESTO id int
 
 
 class GameOut(BaseModel):
@@ -90,7 +98,6 @@ async def create_game(
     game_repo: GameRepository = Depends(get_games_repo),
     player_repo: PlayerRepository = Depends(get_player_repo),
 ) -> GameOut:
-
     if game_create.min_players > game_create.max_players:
         raise HTTPException(
             status_code=412,
@@ -99,7 +106,6 @@ async def create_game(
     player = player_repo.get_by_identifier(game_create.identifier)
     if player is None:
         raise HTTPException(status_code=404, detail="Jugador no encontrado")
-
     new_game = Game(
         name=game_create.name,
         host=player,
@@ -109,13 +115,10 @@ async def create_game(
         started=False,
     )
     new_game.add_player(player)
-
     game_repo.save(new_game)
-
     players_out = [
         PlayerOut(id_player=UUID(str(player.identifier))) for player in new_game.players
     ]
-
     return GameOut(
         id=new_game.id,
         name=new_game.name,
@@ -337,124 +340,73 @@ async def repartir_cartas_figura(
 
 
 class IdentityIn(BaseModel):
-    identifier: UUID
+    id_play: int
 
 
 class PlayersOfGame(BaseModel):
-    identifier: UUID
+    # id_player: int
     name: str
 
 
 class ResponseOut(BaseModel):
-    id: int
-    started: bool
     players: List[PlayersOfGame]
 
 
-# TODO: Eliminar, la idea de esete endpoint es incorrecta.
 @app.patch("/api/lobby/{id}", response_model=ResponseOut)
-def unlock_game_not_started(
-    id: int, ident: IdentityIn, repo: GameRepository = Depends(get_games_repo)
+async def exit_game(
+    id: int,
+    ident: IdentityIn,
+    repo: GameRepository = Depends(get_games_repo),
+    repo_player: PlayerRepository = Depends(get_player_repo),
+    # websocket: WebSocket,
+    manager: services.connection_manager.ConnectionManager = Depends(
+        get_connection_manager
+    ),
 ):
     lobby_query = repo.get(id)
     if lobby_query is None:
         raise HTTPException(status_code=404, detail="Lobby not found")
-    elif lobby_query.started == True:
-        raise HTTPException(status_code=412, detail="Game already started")
+    player_exit = repo_player.get(ident.id_play)  # ver
+    if player_exit is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    elif player_exit not in lobby_query.players:
+        raise HTTPException(status_code=404, detail="Player not in lobby")
 
-    if len(lobby_query.players) == lobby_query.max_players:
-        player_exit = (  # obtiene el jugador de la lista de jugadores que se quiere ir
-            next(
-                (
-                    player
-                    for player in lobby_query.players
-                    if player.identifier == ident.identifier
-                )
-            )
-        )
-        if player_exit == lobby_query.host:  # si el jugador que se quiere ir es el host
-            repo.delete(lobby_query)  # borro la partida
-            return ResponseOut(id=0, started=False, players=[])  # devuelvo vacio
+    # si el host se quiere ir y el juego no empezo, se borra el lobby
+    elif player_exit == lobby_query.host and lobby_query.started is False:
+        # aca hacer un disconect
+        await manager.broadcast({"action": "delete"}, id)
+        await manager.disconnect(websocket, id)
 
-        lobby_query.delete_player(player_exit)  # borro al jugador de la lista
-        lobby_query.started = False  # seteo en falso
-        repo.save(lobby_query)  # guardo los cambios de la partida
-        list_players = [  # guarda la lista de jugadores
-            PlayersOfGame(identifier=UUID(str(player.identifier)), name=player.name)
-            for player in lobby_query.players
-        ]
+        repo.delete(lobby_query)
+        # MANDO UN MENSAJE DE OK, un mensaje
+    elif (
+        len(lobby_query.players) == 2 and lobby_query.started is True
+    ):  # falta test para este caso
+        # aca hacer un broadcast de victoria notificando a los otros jugadores
+        # agregar ws de entradas y salidas de jugadores, se desconecta desde el front
+        repo.delete(lobby_query)
+        # debo hablar con front sobre que retornar en estos casos
         return ResponseOut(
-            id=lobby_query.id, started=lobby_query.started, players=list_players
-        )
-    else:
-        raise HTTPException(
-            status_code=400,
-            detail="No hay suficientes jugadores para desbloquear la partida",
-        )
+            players=[]
+        )  # ver esto con front #mandar la lista de jugadore que quedar
 
-
-class PlayerOutRandom(BaseModel):
-    id: int
-    name: str
-
-
-class ExitRequest(BaseModel):  # le llega esto al endpoint
-    identifier: UUID
-
-
-class GamePlayerResponse(BaseModel):  # Lo que envia
-    game_id: int
-    players: List[PlayerOutRandom]
-    out: ExitRequest
-    activo: bool
-
-
-# api/lobby/{game_id}
-@app.patch("/api/lobby/salir/{game_id}", response_model=GamePlayerResponse)
-async def exitGame(
-    game_id: int,
-    exit_request: ExitRequest,
-    games_repo: GameRepository = Depends(get_games_repo),
-):
-    game = games_repo.get(game_id)
-
-    if not game:
-        raise HTTPException(status_code=404, detail="Partida no encontrada")
-    # ve si el jugador esta en la partida, por las dudas ah
-    elif game.started == False:
-        raise HTTPException(status_code=400, detail="El juego no empezo")
-    elif len(game.players) <= 1 or len(game.players) <= game.min_players:
-        raise HTTPException(
-            status_code=400, detail="numero de jugadores menor al esperado"
-        )
-
-    player_exit = next(
-        player
-        for player in game.players
-        if player.identifier == exit_request.identifier
-    )
-
-    game.delete_player(player_exit)
-    games_repo.save(game)
-    join_leave_manager = Managers.get_manager(ManagerTypes.JOIN_LEAVE)
-    await join_leave_manager.broadcast(
-        {
-            "player_id": player_exit.id,
-            "action": "join",
-            "player_name": player_exit.name,
-        },
-        game.id,
-    )
-
-    return GamePlayerResponse(
-        game_id=game.id,
-        players=[
-            PlayerOutRandom(name=player.name, id=player.id) for player in game.players
-        ],
-        out=ExitRequest(
-            identifier=exit_request.identifier,
-        ),
-        activo=game.started,
+    # en cualquier otro caso, es decir, si el juego ya empezo o si un jugador comun se quiere
+    # ir o el host se quiere y empezo el juego entonces se borra al jugador del lobby o partida :D
+    # aca utilizo un broadcast avisando a otros jugadores
+    lobby_query.delete_player(player_exit)
+    # utilizo el de entradas y salidas para enviar la lista de jugadores
+    repo.save(lobby_query)
+    # list_player va, no va id ni started
+    list_players = [
+        PlayersOfGame(
+            # identifier=player.id_player,
+            name=player.name
+        )  # cambiar esto, no se debe devolver el uuid
+        for player in lobby_query.players
+    ]
+    return ResponseOut(  # aca va solo el nombre, solo va el nombre con la lista de jugadores
+        players=list_players
     )
 
 
