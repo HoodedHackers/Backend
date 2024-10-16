@@ -500,13 +500,10 @@ async def repartir_cartas_movimiento(
     in_game_player = player_repo.get_by_identifier(identifier_player)
     in_game = game_repo.get(req.game_id)
     if in_game_player is None:
-        print("no hay player")
         raise HTTPException(status_code=404, detail="Player dont found!")
     if in_game is None:
-        print("no hay game")
         raise HTTPException(status_code=404, detail="Game dont found!")
     if not in_game_player in in_game.players:
-        print("no hay player en game")
         raise HTTPException(status_code=404, detail="Player dont found in game!")
 
     mov_hand = in_game.player_info[in_game_player.id].hand_mov
@@ -544,6 +541,14 @@ async def lobby_notify_inout(websocket: WebSocket, game_id: int, player_id: int)
 
     Se espera: {user_identifier: 'valor'}
     """
+    game = game_repo.get(game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    player = player_repo.get(player_id)
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
     manager = Managers.get_manager(ManagerTypes.JOIN_LEAVE)
     await manager.connect(websocket, game_id, player_id)
     try:
@@ -559,10 +564,8 @@ async def lobby_notify_inout(websocket: WebSocket, game_id: int, player_id: int)
                 await websocket.send_json({"error": "Player not found"})
                 continue
 
-            game = game_repo.get(game_id)
-            if game is None:
-                await websocket.send_json({"error": "Game not found"})
-                continue
+            game.add_player(player)
+            game_repo.save(game)
 
             players_raw = game.players
             players = [{"player_id": p.id, "player_name": p.name} for p in players_raw]
@@ -571,7 +574,9 @@ async def lobby_notify_inout(websocket: WebSocket, game_id: int, player_id: int)
 
     except WebSocketDisconnect:
         manager.disconnect(game_id, player_id)
-
+        players_raw = game.players
+        players = [{"player_id": p.id, "player_name": p.name} for p in players_raw]
+        await manager.broadcast({"players": players}, game_id)
 
 @app.websocket("/ws/lobby/{game_id}/status")
 async def lobby_notify_status(websocket: WebSocket, game_id: int, player_id: int):
@@ -588,5 +593,42 @@ async def lobby_notify_status(websocket: WebSocket, game_id: int, player_id: int
     try:
         while True:
             data = await websocket.receive_json()
+    except WebSocketDisconnect:
+        manager.disconnect(game_id, player_id)
+
+
+@app.websocket("/ws/lobby/{game_id}/select")
+async def select_card(
+    websocket: WebSocket,
+    game_id: int,
+    player_id: int,
+):
+    """
+    Este ws se encarga de recibir la selección de cartas de un jugador y notificar a los demás jugadores de la partida.
+    Se espera: {card_id: 'valor'}
+    """
+    game = game_repo.get(game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    player = player_repo.get(player_id)
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    manager = Managers.get_manager(ManagerTypes.CARDS)
+    await manager.connect(websocket, game_id, player_id)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            card_id = data.get("card_id")
+
+            hand = game.player_info[player_id].hand_mov
+            if card_id not in hand:
+                await websocket.send_json({"error": "Card not in hand"})
+                continue
+
+            await manager.broadcast(
+                {"player_id": player_id, "card_id": card_id}, game_id
+            )
     except WebSocketDisconnect:
         manager.disconnect(game_id, player_id)
