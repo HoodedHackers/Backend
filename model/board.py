@@ -1,8 +1,10 @@
 from enum import Enum
 from random import randint
-from typing_extensions import List
 
 from sqlalchemy.types import VARCHAR, TypeDecorator
+from typing_extensions import List
+
+SIZE_BOARD = 36
 
 
 class Color(Enum):
@@ -26,5 +28,5 @@ class Board(TypeDecorator):
         return [Color(int(c)) for c in value]
 
     @staticmethod
-    def random_board(count=36) -> List[Color]:
+    def random_board(count=SIZE_BOARD) -> List[Color]:
         return [Color(randint(1, 4)) for _ in range(count)]
